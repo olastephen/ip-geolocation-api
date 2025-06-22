@@ -10,17 +10,108 @@ import csv
 import io
 from fastapi.staticfiles import StaticFiles
 import ipaddress
+import subprocess
+import sys
 
 app = FastAPI()
 
-db_path = os.path.join("DB", "GeoLite2-City.mmdb")
-reader = Reader(db_path)
+# Initialize database readers (optional)
+reader = None
+asn_reader = None
+country_reader = None
 
-asn_db_path = os.path.join("DB", "GeoLite2-ASN.mmdb")
-asn_reader = Reader(asn_db_path)
+def download_databases():
+    """Download MaxMind databases if credentials are provided"""
+    account_id = os.getenv('MAXMIND_ACCOUNT_ID')
+    license_key = os.getenv('MAXMIND_LICENSE_KEY')
+    
+    if not account_id or not license_key:
+        print("MaxMind credentials not found in environment variables.")
+        print("Set MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY to enable automatic database download.")
+        return False
+    
+    try:
+        # Create DB directory if it doesn't exist
+        os.makedirs('DB', exist_ok=True)
+        
+        # Create GeoIP.conf file
+        config_content = f"""AccountID {account_id}
+LicenseKey {license_key}
+EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country
+"""
+        
+        with open('GeoIP.conf', 'w') as f:
+            f.write(config_content)
+        
+        # Install geoipupdate if not available
+        try:
+            subprocess.run(['geoipupdate', '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("Installing geoipupdate...")
+            subprocess.run(['apt-get', 'update'], check=True)
+            subprocess.run(['apt-get', 'install', '-y', 'wget', 'gnupg'], check=True)
+            subprocess.run([
+                'wget', '-O', '-', 
+                'https://github.com/maxmind/geoipupdate/releases/download/v6.1.0/geoipupdate_6.1.0_linux_amd64.deb'
+            ], check=True, stdout=subprocess.PIPE)
+            subprocess.run(['dpkg', '-i', 'geoipupdate_6.1.0_linux_amd64.deb'], check=True)
+        
+        # Download databases
+        print("Downloading MaxMind databases...")
+        subprocess.run(['geoipupdate', '-f', 'GeoIP.conf'], check=True)
+        
+        # Move databases to DB directory
+        if os.path.exists('/usr/share/GeoIP/GeoLite2-City.mmdb'):
+            subprocess.run(['mv', '/usr/share/GeoIP/GeoLite2-City.mmdb', 'DB/'], check=True)
+        if os.path.exists('/usr/share/GeoIP/GeoLite2-ASN.mmdb'):
+            subprocess.run(['mv', '/usr/share/GeoIP/GeoLite2-ASN.mmdb', 'DB/'], check=True)
+        if os.path.exists('/usr/share/GeoIP/GeoLite2-Country.mmdb'):
+            subprocess.run(['mv', '/usr/share/GeoIP/GeoLite2-Country.mmdb', 'DB/'], check=True)
+        
+        # Clean up
+        if os.path.exists('GeoIP.conf'):
+            os.remove('GeoIP.conf')
+        
+        print("Database download completed successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"Error downloading databases: {e}")
+        return False
 
-country_db_path = os.path.join("DB", "GeoLite2-Country.mmdb")
-country_reader = Reader(country_db_path)
+# Try to download databases on startup
+download_success = download_databases()
+
+# Try to load databases if they exist
+try:
+    db_path = os.path.join("DB", "GeoLite2-City.mmdb")
+    if os.path.exists(db_path):
+        reader = Reader(db_path)
+        print("City database loaded successfully")
+    else:
+        print("City database not found")
+except Exception as e:
+    print(f"Warning: Could not load City database: {e}")
+
+try:
+    asn_db_path = os.path.join("DB", "GeoLite2-ASN.mmdb")
+    if os.path.exists(asn_db_path):
+        asn_reader = Reader(asn_db_path)
+        print("ASN database loaded successfully")
+    else:
+        print("ASN database not found")
+except Exception as e:
+    print(f"Warning: Could not load ASN database: {e}")
+
+try:
+    country_db_path = os.path.join("DB", "GeoLite2-Country.mmdb")
+    if os.path.exists(country_db_path):
+        country_reader = Reader(country_db_path)
+        print("Country database loaded successfully")
+    else:
+        print("Country database not found")
+except Exception as e:
+    print(f"Warning: Could not load Country database: {e}")
 
 LOG_FILE = "requests.log"
 
@@ -44,6 +135,11 @@ def geolocate(request: Request, ip: Optional[str] = Query(None, description="IP 
     if not validate_ip(ip):
         log_request("/geolocate", ip, "invalid_ip", user_agent)
         raise HTTPException(status_code=400, detail="Invalid IP address format.")
+    
+    if reader is None:
+        log_request("/geolocate", ip, "database_not_available", user_agent)
+        raise HTTPException(status_code=503, detail="Geolocation database not available. Please check configuration.")
+    
     try:
         response = reader.city(ip)
         result = {
@@ -76,6 +172,11 @@ def geolocate(request: Request, ip: Optional[str] = Query(None, description="IP 
 @app.post("/geolocate/batch")
 def batch_geolocate(request: Request, ips: List[str] = Body(..., example=["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"], description="List of IP addresses to geolocate"), format: str = Query("json", description="Response format: json or csv")) -> Response:
     user_agent = request.headers.get("user-agent", "-")
+    
+    if reader is None:
+        log_request("/geolocate/batch", "batch", "database_not_available", user_agent)
+        raise HTTPException(status_code=503, detail="Geolocation database not available. Please check configuration.")
+    
     results = []
     for ip in ips:
         if not validate_ip(ip):
@@ -120,6 +221,11 @@ def asn_lookup(request: Request, ip: Optional[str] = Query(None, description="IP
     if not validate_ip(ip):
         log_request("/asn", ip, "invalid_ip", user_agent)
         raise HTTPException(status_code=400, detail="Invalid IP address format.")
+    
+    if asn_reader is None:
+        log_request("/asn", ip, "database_not_available", user_agent)
+        raise HTTPException(status_code=503, detail="ASN database not available. Please check configuration.")
+    
     try:
         response = asn_reader.asn(ip)
         result = {
@@ -143,6 +249,12 @@ def country_lookup(request: Request, ip: Optional[str] = Query(None, description
         ip = request.client.host
     if not validate_ip(ip):
         log_request("/country", ip, "invalid_ip", user_agent)
+        raise HTTPException(status_code=400, detail="Invalid IP address format.")
+    
+    if country_reader is None:
+        log_request("/country", ip, "database_not_available", user_agent)
+        raise HTTPException(status_code=503, detail="Country database not available. Please check configuration.")
+    
     try:
         response = country_reader.country(ip)
         result = {
@@ -165,6 +277,9 @@ def reverse_dns(request: Request, ip: Optional[str] = Query(None, description="I
     user_agent = request.headers.get("user-agent", "-")
     if not ip:
         ip = request.client.host
+    if not validate_ip(ip):
+        log_request("/reverse_dns", ip, "invalid_ip", user_agent)
+        raise HTTPException(status_code=400, detail="Invalid IP address format.")
     try:
         ptr_record = socket.gethostbyaddr(ip)[0]
         log_request("/reverse_dns", ip, "success", user_agent)

@@ -1,8 +1,8 @@
 # Use official Python image
 FROM python:3.11-slim
 
-# Install geoipupdate for downloading MaxMind databases
-RUN apt-get update && apt-get install -y wget gnupg && \
+# Install system dependencies for geoipupdate
+RUN apt-get update && apt-get install -y wget gnupg curl && \
     wget -O - https://github.com/maxmind/geoipupdate/releases/download/v6.1.0/geoipupdate_6.1.0_linux_amd64.deb | dpkg -i - && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -13,25 +13,58 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create DB directory and download MaxMind databases
-RUN mkdir -p DB
-# Create GeoIP.conf from environment variables during build
-ARG MAXMIND_ACCOUNT_ID
-ARG MAXMIND_LICENSE_KEY
-RUN echo "AccountID ${MAXMIND_ACCOUNT_ID}" > GeoIP.conf && \
-    echo "LicenseKey ${MAXMIND_LICENSE_KEY}" >> GeoIP.conf && \
-    echo "EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country" >> GeoIP.conf && \
-    geoipupdate -f GeoIP.conf && \
-    mv /usr/share/GeoIP/GeoLite2-City.mmdb DB/ && \
-    mv /usr/share/GeoIP/GeoLite2-ASN.mmdb DB/ && \
-    mv /usr/share/GeoIP/GeoLite2-Country.mmdb DB/ && \
-    rm GeoIP.conf
-
 # Copy application code
 COPY . .
+
+# Create DB directory
+RUN mkdir -p DB
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+echo "Starting IP Geolocation API..."\n\
+\n\
+# Check if MaxMind credentials are provided\n\
+if [ -n "$MAXMIND_ACCOUNT_ID" ] && [ -n "$MAXMIND_LICENSE_KEY" ]; then\n\
+    echo "MaxMind credentials found. Downloading databases..."\n\
+    \n\
+    # Create GeoIP.conf\n\
+    cat > GeoIP.conf << EOF\n\
+AccountID $MAXMIND_ACCOUNT_ID\n\
+LicenseKey $MAXMIND_LICENSE_KEY\n\
+EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country\n\
+EOF\n\
+    \n\
+    # Download databases\n\
+    geoipupdate -f GeoIP.conf\n\
+    \n\
+    # Move databases to DB directory\n\
+    if [ -f "/usr/share/GeoIP/GeoLite2-City.mmdb" ]; then\n\
+        mv /usr/share/GeoIP/GeoLite2-City.mmdb DB/\n\
+        echo "City database downloaded"\n\
+    fi\n\
+    if [ -f "/usr/share/GeoIP/GeoLite2-ASN.mmdb" ]; then\n\
+        mv /usr/share/GeoIP/GeoLite2-ASN.mmdb DB/\n\
+        echo "ASN database downloaded"\n\
+    fi\n\
+    if [ -f "/usr/share/GeoIP/GeoLite2-Country.mmdb" ]; then\n\
+        mv /usr/share/GeoIP/GeoLite2-Country.mmdb DB/\n\
+        echo "Country database downloaded"\n\
+    fi\n\
+    \n\
+    # Clean up\n\
+    rm -f GeoIP.conf\n\
+    echo "Database download completed!"\n\
+else\n\
+    echo "MaxMind credentials not provided. Running without geolocation databases."\n\
+    echo "Set MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY environment variables to enable geolocation."\n\
+fi\n\
+\n\
+# Start the FastAPI app\n\
+exec uvicorn main:app --host 0.0.0.0 --port 8000\n\
+' > /app/start.sh && chmod +x /app/start.sh
 
 # Expose port
 EXPOSE 8000
 
-# Run the FastAPI app with uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
+# Use the startup script
+CMD ["/app/start.sh"] 

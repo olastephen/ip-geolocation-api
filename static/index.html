@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IP Geolocation Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f4f6fa; }
+        .container { max-width: 900px; margin: 30px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px #0001; padding: 24px; }
+        h1 { text-align: center; }
+        label { font-weight: bold; }
+        textarea, select, button { width: 100%; margin: 8px 0 16px 0; padding: 8px; border-radius: 4px; border: 1px solid #ccc; }
+        button { background: #007bff; color: #fff; border: none; cursor: pointer; font-size: 1rem; }
+        button:hover { background: #0056b3; }
+        table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background: #f0f0f0; }
+        #map { height: 350px; margin-top: 20px; border-radius: 8px; }
+        .instructions { background: #e9f5ff; padding: 12px; border-radius: 6px; margin-bottom: 18px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>IP Geolocation Dashboard</h1>
+        <div class="instructions">
+            <b>Instructions:</b> Enter one or more IP addresses (one per line). Select the lookup type and click "Lookup". For City lookups, results will be shown on the map.
+        </div>
+        <label for="ips">IP Addresses (one per line):</label>
+        <textarea id="ips" rows="3" placeholder="8.8.8.8\n1.1.1.1\n2001:4860:4860::8888"></textarea>
+        <label for="lookupType">Lookup Type:</label>
+        <select id="lookupType">
+            <option value="city">City (Geolocation)</option>
+            <option value="asn">ASN</option>
+            <option value="country">Country</option>
+            <option value="reverse_dns">Reverse DNS</option>
+        </select>
+        <button onclick="lookup()">Lookup</button>
+        <div id="results"></div>
+        <div id="map" style="display:none;"></div>
+    </div>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        let map, markers = [];
+        function clearMap() {
+            if (map) {
+                markers.forEach(m => map.removeLayer(m));
+                markers = [];
+            }
+        }
+        function showMap(results) {
+            document.getElementById('map').style.display = 'block';
+            if (!map) {
+                map = L.map('map').setView([20, 0], 2);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 18,
+                }).addTo(map);
+            }
+            clearMap();
+            results.forEach(res => {
+                if (res.latitude && res.longitude) {
+                    let marker = L.marker([res.latitude, res.longitude]).addTo(map);
+                    marker.bindPopup(`<b>${res.ip}</b><br>${res.city || ''}, ${res.country || ''}`);
+                    markers.push(marker);
+                }
+            });
+            if (markers.length) {
+                let group = new L.featureGroup(markers);
+                map.fitBounds(group.getBounds().pad(0.3));
+            }
+        }
+        async function lookup() {
+            const ips = document.getElementById('ips').value.trim().split(/\s+/).filter(Boolean);
+            const type = document.getElementById('lookupType').value;
+            const resultsDiv = document.getElementById('results');
+            document.getElementById('map').style.display = 'none';
+            resultsDiv.innerHTML = 'Loading...';
+            let endpoint = '';
+            let method = 'GET';
+            let body = null;
+            let results = [];
+            try {
+                if (type === 'city') {
+                    endpoint = ips.length > 1 ? '/geolocate/batch' : '/geolocate';
+                    method = ips.length > 1 ? 'POST' : 'GET';
+                } else if (type === 'asn') {
+                    endpoint = '/asn';
+                } else if (type === 'country') {
+                    endpoint = '/country';
+                } else if (type === 'reverse_dns') {
+                    endpoint = '/reverse_dns';
+                }
+                if (method === 'POST') {
+                    const resp = await fetch(endpoint + '?format=json', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(ips)
+                    });
+                    results = await resp.json();
+                } else {
+                    results = [];
+                    for (let ip of ips) {
+                        let url = endpoint + '?ip=' + encodeURIComponent(ip) + '&format=json';
+                        const resp = await fetch(url);
+                        results.push(await resp.json());
+                    }
+                }
+                // Display results
+                if (!Array.isArray(results)) results = [results];
+                if (type === 'city') {
+                    showMap(results.filter(r => r.latitude && r.longitude));
+                }
+                let table = '<table><thead><tr>';
+                const keys = Object.keys(results[0] || {});
+                keys.forEach(k => { table += `<th>${k}</th>`; });
+                table += '</tr></thead><tbody>';
+                results.forEach(r => {
+                    table += '<tr>';
+                    keys.forEach(k => { table += `<td>${r[k] !== undefined ? r[k] : ''}</td>`; });
+                    table += '</tr>';
+                });
+                table += '</tbody></table>';
+                resultsDiv.innerHTML = table;
+            } catch (e) {
+                resultsDiv.innerHTML = '<span style="color:red">Error: ' + e + '</span>';
+            }
+        }
+    </script>
+</body>
+</html> 

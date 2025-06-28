@@ -127,23 +127,34 @@ def validate_ip(ip: str):
     except ValueError:
         return False
 
+def resolve_domain_to_ip(value: str) -> str:
+    """Resolve a domain name to its IP address. Return the original value if already an IP."""
+    if validate_ip(value):
+        return value
+    try:
+        return socket.gethostbyname(value)
+    except Exception:
+        return None
+
 @app.get("/geolocate")
-def geolocate(request: Request, ip: Optional[str] = Query(None, description="IP address to geolocate"), format: str = Query("json", description="Response format: json or csv")):
+def geolocate(request: Request, ip: Optional[str] = Query(None, description="IP address or domain to geolocate"), format: str = Query("json", description="Response format: json or csv")):
     user_agent = request.headers.get("user-agent", "-")
     if not ip:
         ip = request.client.host
-    if not validate_ip(ip):
-        log_request("/geolocate", ip, "invalid_ip", user_agent)
+    resolved_ip = resolve_domain_to_ip(ip)
+    if not resolved_ip:
+        log_request("/geolocate", ip, "invalid_ip_or_domain", user_agent)
+        raise HTTPException(status_code=400, detail="Invalid IP address or domain name could not be resolved.")
+    if not validate_ip(resolved_ip):
+        log_request("/geolocate", resolved_ip, "invalid_ip", user_agent)
         raise HTTPException(status_code=400, detail="Invalid IP address format.")
-    
     if reader is None:
-        log_request("/geolocate", ip, "database_not_available", user_agent)
+        log_request("/geolocate", resolved_ip, "database_not_available", user_agent)
         raise HTTPException(status_code=503, detail="Geolocation database not available. Please check configuration.")
-    
     try:
-        response = reader.city(ip)
+        response = reader.city(resolved_ip)
         result = {
-            "ip": ip,
+            "ip": resolved_ip,
             "city": response.city.name,
             "country": response.country.name,
             "continent": response.continent.name,
@@ -154,7 +165,7 @@ def geolocate(request: Request, ip: Optional[str] = Query(None, description="IP 
             "subdivision": response.subdivisions.most_specific.name,
             "accuracy_radius_km": response.location.accuracy_radius
         }
-        log_request("/geolocate", ip, "success", user_agent)
+        log_request("/geolocate", resolved_ip, "success", user_agent)
         if format == "csv":
             output = io.StringIO()
             writer = csv.DictWriter(output, fieldnames=result.keys())
@@ -163,10 +174,10 @@ def geolocate(request: Request, ip: Optional[str] = Query(None, description="IP 
             return Response(content=output.getvalue(), media_type="text/csv")
         return JSONResponse(content=result)
     except AddressNotFoundError:
-        log_request("/geolocate", ip, "not_found", user_agent)
+        log_request("/geolocate", resolved_ip, "not_found", user_agent)
         raise HTTPException(status_code=404, detail="IP address not found in database.")
     except Exception as e:
-        log_request("/geolocate", ip, f"error: {str(e)}", user_agent)
+        log_request("/geolocate", resolved_ip, f"error: {str(e)}", user_agent)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/geolocate/batch")

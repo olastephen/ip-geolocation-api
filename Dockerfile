@@ -2,9 +2,12 @@
 FROM python:3.11-slim
 
 # Install system dependencies for geoipupdate
-RUN apt-get update && apt-get install -y wget gnupg curl && \
-    wget -O - https://github.com/maxmind/geoipupdate/releases/download/v6.1.0/geoipupdate_6.1.0_linux_amd64.deb | dpkg -i - && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y wget gnupg curl && \
+    wget -O /tmp/geoipupdate.deb https://github.com/maxmind/geoipupdate/releases/download/v6.1.0/geoipupdate_6.1.0_linux_amd64.deb && \
+    dpkg -i /tmp/geoipupdate.deb && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/geoipupdate.deb
 
 # Set work directory
 WORKDIR /app
